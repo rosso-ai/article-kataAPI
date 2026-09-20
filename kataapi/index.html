@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>kataAPI — TTS のためのカタカナ変換システム（レビュー用）</title>
+<style>
+:root{--bg:#f7f7f5;--fg:#1a1a1a;--mut:#7a7a75;--line:#e3e3df;--card:#fff;
+--acc:#b4532a}
+@media(prefers-color-scheme:dark){:root{--bg:#16161a;--fg:#e8e8e4;--mut:#9a9a94;
+--line:#2e2e34;--card:#1e1e23;--acc:#e08a5e}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-size:16px;line-height:1.9;
+font-family:-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif}
+.note{max-width:620px;margin:0 auto;background:var(--card);padding:40px 0 120px}
+.bar{max-width:620px;margin:0 auto 22px;background:#fff8e6;border:1px solid #e8d9a8;
+border-radius:8px;padding:13px 17px;font-size:13.5px;line-height:1.8;color:#4a3f1e}
+@media(prefers-color-scheme:dark){.bar{background:#2a2618;border-color:#4a4228;color:#e8dcb8}}
+h1{font-size:28px;line-height:1.5;margin:0 0 30px}
+h2{font-size:21px;margin:52px 0 12px}
+h3{font-size:17px;margin:34px 0 10px}
+p{margin:22px 0}
+img{width:100%;display:block;margin:26px 0 6px;border:1px solid var(--line)}
+.cap{color:var(--mut);font-size:13px;margin:0 0 26px;line-height:1.7}
+blockquote{margin:24px 0;padding:12px 0 12px 18px;border-left:3px solid var(--line);
+color:var(--mut)}
+blockquote p{margin:2px 0}
+pre{background:var(--bg);border-radius:5px;padding:14px 16px;overflow-x:auto;
+font-size:13px;line-height:1.7;margin:24px 0;
+font-family:ui-monospace,Consolas,monospace}
+code{background:var(--bg);padding:1px 5px;border-radius:3px;font-size:14px}
+ul,ol{margin:22px 0;padding-left:1.5em}li{margin:8px 0}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.au{border:1px dashed var(--line);border-radius:8px;padding:14px 16px;margin:26px 0;
+background:var(--bg)}
+.au .t{font-weight:600;font-size:14px;color:var(--acc)}
+.au .s{font-size:12.5px;color:var(--mut);margin-top:4px}
+a{color:#2a6b7c}
+</style>
+</head>
+<body>
+<div class="bar"><b>これはレビュー用のページです。</b>note に貼ったときの見え方を620px幅で再現しています。<b>音声は置いていません</b>（位置だけ点線の箱で示しています）。気づいた点があれば教えてください。</div>
+
+<div class="note">
+<h1>kataAPI — TTS のためのカタカナ変換システム</h1>
+<h2>日本語 TTS モデルは英単語が苦手？</h2>
+<p>最近、とてもいい感じに日本語の音声を出力してくれる<b>Irodori-TTS</b> という音声合成モデルを気に入って使っています。</p>
+<p>ただ、Irodori-TTSには弱点があります。それは<b>英単語読みに難があることです。</b>英単語をカタカナにする機能がそもそもありません。アルファベットはそのままモデルに入り、<b>どう読まれるかはモデル任せ</b>になります。</p>
+<pre>入力  Kubernetes上のnginxをTerraformで立てる。GraphRAGの話もします。
+音    クーバネテス上のいんでぃげーすをティファるふぁるでたてる。ぐらふらじ〜の話もします</pre>
+<p>ほかのエンジンはどうなのか、VOICEVOX と AivisSpeech という日本語専用のエンジンを手元に落として比べてみました。</p>
+<p>VOICEVOX 0.25.2 に<b>「GraphRAGの話」</b>と入れると、<b>「グラフアアルエエジイノハナシ」</b>と読まれました。<b>Graph</b> は読めていて、<b>RAG</b> だけを R、A、G と読み上げています。架空のサービス名として <b>ZORPHINE</b> を入れると、今度は丸ごと<b>「ズィイオオアアルピイエイチアイエヌイイ」</b>でした。</p>
+<img src="img01.png" alt="">
+<p>AivisSpeech 1.2.0 には、<b>綴りをカタカナにする機能があるようです。</b> <b>kanalizer</b> という変換器を同梱してるようです。</p>
+<p>では英単語を自然に読める AivisSpeech を使えばいいのか？というと、やっぱり自分には AivisSpeech より Irodori-TTS の方を使いたいんです！<br>それに、自然な会話をTTSで楽しむなら全体的なレスポンス時間を詰める必要があるため、数ms〜数十msでも削りたいというのが正直なところです。</p>
+<p>AivisSpeechは語ごとにkanalizerを使用するので、<b>英単語が増えれば、その数だけ時間が積み上がります。</b>kanalizer を単体で測ると、1語あたり <b>4.3ms</b>（15語を20回ずつ、中央値。最小 3.2ms、最大 5.5ms）。1文に3語あれば 13ms、6語なら 26ms です。</p>
+<h2>kataAPI : レスポンスの早い、日本人が読むように英単語を読むシステム</h2>
+<p>そこで、TTS に渡す前に英単語をカタカナへ直す API を作りました。<b>kataAPI</b> です。</p>
+<p>ここで言う「日本人が読むように」とは、<b>英語の発音に近づけることとは違います。</b>kataAPIが返すのは英語発音の忠実な転写ではなく、その英字が日本語文中に現れたときに自然なカタカナ表現です。英語の音に寄せた読みと、カタカナ英語の読みの違いとは、以下のようになります。</p>
+<img src="img02.png" alt="">
+<p class="cap">真ん中の列は kanalizer の出力です。</p>
+<p>合成音声に「このヴァージョンのヴァイラス対策」と読ませると、「なんだ？お前は急に！」となるでしょう。欲しいのは、日本語の文章に混ざったときに引っかからない読みのほうです。</p>
+<p>右の列は、<b>綴りからは単純に出てこない、日本独自のカタカナ読みとなります。</b>どんな規則を書いても <b>virus</b> は「ウイルス」になりませんし、<b>theme</b> も「テーマ」になりません。この辺が英単語のめんどくさいところですよね。</p>
+<p>そのうえで、<b>辞書に載っていない綴り</b>も読めるようにしたいです。</p>
+<pre>ZORPHINE                      → ゾーファイン
+antidisestablishmentarianism  → アンチディセスタブリシュメンタリアニスム
+GraphRAG                      → グラフラグ</pre>
+<p>この3語は、どれも辞書ではなく、人間のように綴りだけを見て読みを作っています。</p>
+<p>読みの作り方は、<b>日本人が英語を読むときのクセをなぞっています。</b><br>英語を読むときのクセとは？<br><b>ZORPHINE</b> を例に、中で何が起きているかを追ってみます。</p>
+<img src="img03.png" alt="">
+<p class="cap">語末に e があるとき、i の読みが「イ」から「アイ」に変わります。その e 自体は読みません。</p>
+<p>長い語も、やることは変わりません。先に知っている接頭辞を外して、残りを同じ規則にかけます。</p>
+<img src="img04.png" alt="">
+<p class="cap">28文字が10個の単位に割れます。1つずつカタカナに直して繋ぐだけなので、語が長くなっても手順は増えません。</p>
+<h2>どういう仕組みか</h2>
+<p>1語の読みは、<b>辞書引き・綴り推定・一文字読み</b>を、この順に当てて決めています。当たったところで確定し、当たらなければ次を試します。</p>
+<img src="img05.png" alt="">
+<p class="cap">冒頭で見た VOICEVOX の読みは、一文字読みが語全体へ出ていた状態です。一文字読みは最後の手段で、まず辞書引きと綴り推定で受け止めます。</p>
+<h3>① 辞書引き</h3>
+<p>辞書引きには Aho-Corasick を使っています。11万語ぶんの検索木をあらかじめ組んでおいて、<b>入力を頭から1回なぞるだけ</b>で、当てはまる語を全部拾う方法です。1語ずつ照合しにいかないので、辞書件数に比例して全語を照合する必要はなく、検索は基本的に入力長に対して線形です</p>
+<h3>② 綴り推定</h3>
+<p>綴り推定のほうは、接頭辞 24 種類、語尾 9 種類、母音のまとまり 39 種類、2文字で1音になる子音 14 種類といった表を順に当てて、そのうえで促音やマジック e の規則をかけます。</p>
+<p>そのぶん、未知語を3語含む文では、初回0.126msでした。辞書だけで処理できる平均30文字の文0.035msと比べると3倍強です。</p>
+<p>高速化のために同じ綴りが二度目に出てきたときは、綴り推定をやり直す必要がないように、一度決めた読みを控えておいて、次からはそれを参照できるようにしました。</p>
+<h3>③ 一文字読み</h3>
+<p>母音が1つも無い綴りや、英語に出てこない子音の並びは、単語として読めません。ここまで来た綴りは、一文字ずつ読みます。</p>
+<pre>HTML → エイチティーエムエル     母音が1つも無い
+OECD → オーイーシーディー       cd が並ぶ語は英語に無い
+NHK  → エヌエイチケー          母音が1つも無い</pre>
+<p>ここは<b>3文字以下には使えません。</b> <b>RAM</b>（ラム）と <b>LED</b>（エルイーディー）は、どちらも子音・母音・子音で、綴りの上で区別が付かないからです。短い略語は、辞書で1語ずつ持っています。</p>
+<img src="img06.png" alt="">
+<h2>辞書の集め方</h2>
+<p>11万語を集めました。<b>語を連れてくる</b>のと<b>読みを決める</b>のは別の作業で、手間がかかったのは後者のほうです。</p>
+<img src="img07.png" alt="">
+<img src="img08.png" alt="">
+<p>上から順に説明します。</p>
+<h3>綴りから機械が作成(e2k) 28,226語</h3>
+<p>まず「どんな英単語が世の中にあるか」の一覧が要ります。今回は<b>CMUdict</b> の力を借りました。カーネギーメロン大学が公開している英語の発音辞書で、13万語ほどの英単語に、その語をどう発音するかが書いてあります。</p>
+<pre>docker D AA1 K ER0
+java JH AA1 V AH0
+python P AY1 TH AA0 N
+water W AO1 T ER0</pre>
+<p>左が見出しの単語、右がその発音です。ここで用があるのは<b>一番左の見出し語だけ</b>で、発音記号のほうは捨てています。</p>
+<p>その見出し語を1語ずつ <b>e2k</b> に入れて、カタカナの読みを受け取りました。e2k は綴りを入れるとカタカナを返す小さなモデルで、AivisSpeech が使う kanalizer と同じ仕事をします。</p>
+<pre>docker      → ドッカー
+java        → ジャバ
+virus       → ウイルス
+banana      → バナナ</pre>
+<p>e2k は1語に 36ms かかるので、リクエストのたびには回せません。ビルドのときに1回だけ通して、出てきた読みを辞書に持っておきます。</p>
+<p>綴り推定と同じ読みになる語は、辞書に入れていません。同じ答えなら実行時に作れるからです。この基準で2万6千語あまりが辞書の外に出ました。</p>
+<h3>複数の候補を並べてLLM as a Judge 83,144語</h3>
+<p>機械が作った読みには、間違っているものが混ざります。やっかいなのは、<b>どれが間違っているかが機械には分からない</b>ことです。どんな綴りを入れても規則は必ず何か返すので、出てきたカタカナを見ても判定できません。</p>
+<pre>violin     → ビオリン      （バイオリン）
+McDonald   → ムクドナルド    （マクドナルド）</pre>
+<p>そこで、1つの綴りに<b>6つの候補</b>を並べました。</p>
+<pre>いまの辞書 ／ 綴り推定 ／ e2k（綴りから） ／ e2k（音素から） ／ kanalizer ／ JMdict</pre>
+<p><b>JMdict</b> は和英辞典のデータで、カタカナの見出しに英語の語釈が付いています。</p>
+<pre>ウイルス    virus; germ
+ゴール      goal; finish line</pre>
+<p>辞書を逆から引けば、英語の語釈からカタカナの見出しが候補として集まります。</p>
+<p>この6つを並べて、<b>gpt5.6-sol と gpt5.6-luna に「日本語として自然な読み方」を考えさせます。</b></p>
+<pre>great  候補 グリート / オオカンガルー（？） / グラン / グレイト   → グレート
+btc    候補 ブトク / ブッ / ブック / ビットコイン        → ビーティーシー</pre>
+<p>6つの候補を並べて考えさせた結果、<b>37,727 綴り</b>の読みが変わりました。<b>comb</b> がコンブ、<b>dawn</b> がダウンだったのも、ここで直っています。</p>
+<p>中学高校レベルの英単語も、以下のように直りました。</p>
+<pre>this   シス    → ディス       said   サイード → セッド
+could  カルド   → クッド       take   タケ   → テイク
+learn  リアン   → ラーン       want   ワント  → ウォント
+they   テイ    → ゼイ         their  ター   → ゼア
+where  ホワー   → ウェア       many   マニー  → メニー</pre>
+<p><b>技術用語と新語 353語</b></p>
+<p>ここまでの語は、いかにも英単語というのが中心でした。<b>Firebase</b> や <b>Terraform</b> は、辞書に載っていません。</p>
+<p>どの語を拾うかは <b>Qiita のタグに付いている記事数</b>で決めました。タグを 3,000 件取ってきて、記事数の多い順に上から見ています。</p>
+<pre>Python      105,364本
+JavaScript   65,863本
+AWS          59,295本</pre>
+<p>この順で見ていくと、技術用語と新しいサービス名が先に来ます。よく書かれている語ほど、読み間違いが人の耳に触れる回数も多いはずです。読みがどこにも無かった <b>353 語</b>は、LLM に一から書かせました。</p>
+<pre>AUTOSAR          → オートザー
+AppSync          → アップシンク
+ActiveDirectory  → アクティブディレクトリ
+Agora.io         → アゴラドットアイオー</pre>
+<h3>日本語版Wikipedia 5,261語</h3>
+<p>ここまでは、どれも機械が決めた読みです。<b>正しいと言える材料が、どこにもありません。</b>機械が返したカタカナを見ても、それが合っているかは判定できません。</p>
+<p>そこで、<b>日本語版 Wikipedia</b> を使いました。日本語版の記事は、冒頭の1文が<b>「見出し語（カタカナ）」</b>の形で始まります。</p>
+<pre>nginx（「エンジンエックス」）は、フリーでオープンソースなWebサーバアプリケーションである。
+
+Vim（ヴィム。「ヴィアイエム」という読み方は誤り）は、vi から派生し、
+発展した高機能なテキストエディタである。</pre>
+<p>綴りをそのまま記事名にして引き、<b>最初の1文の丸括弧からカタカナを取り出すことで固有名詞のカタカナ読みを集めました。</b></p>
+<h3>ここまでやって、まだ対応できていなかった中学レベルの英単語 1,102語</h3>
+<p>CMUdict から見出し語を選ぶとき、<b>4文字以上</b>に絞ってしまっていたため、以下のような簡単な単語に対応できていませんでした。</p>
+<pre>of   → オフ      be  → ベ      as  → アス
+by   → ビー      we  → ウェ     no  → ノ</pre>
+<p>英単語の使用頻度表（wordfreq）の上位3万語を引いて、ここまでの辞書に行が無い <b>3,459 綴り</b>を選び直しました。うち 2,319 綴りは綴り推定と同じ読みになったので、入れたのは残りの <b>1,102 綴り</b>です。</p>
+<h2>対応できた英単語の例</h2>
+<p>これまでの説明で対応できた単語について紹介していきます。</p>
+<h3>技術の文章によく出てくる語</h3>
+<pre>Kubernetes上のnginxをTerraformで立てる
+  → クーベネティス上のエンジンエックスをテラフォームで立てる
+
+Claude CodeでGraphRAGを実装した
+  → クロードコードでグラフラグを実装した</pre>
+<p><b>nginx</b> の読みは <b>エンジンエックス</b> だそうです。私は知りませんでした。</p>
+<h3>大文字と小文字が切り替わる語</h3>
+<pre>iPhone   → アイフォン        macOS  → マックオーエス
+VSCode   → ブイエスコード      Log4j  → ログフォージェイ</pre>
+<p>小文字から大文字に変わるところを、語の切れ目として扱っています。<b>VSCode</b> は <b>VS</b> と <b>Code</b> に割れるので、略語の部分だけを一文字ずつ読みます。</p>
+<h3>記号が混ざる語</h3>
+<pre>C++    → シープラスプラス     C#     → シーシャープ
+.NET   → ドットネット        Node.js → ノードジェイエス</pre>
+<p>記号のまま渡すと TTS に無視されるので、ここでカタカナに変えておきます。</p>
+<h3>数字と単位</h3>
+<pre>iPhone 15 Proのバッテリーは3000mAhです
+  → アイフォン15プロのバッテリーは3000ミリアンペアアワーです</pre>
+<p>数字の直後に来る <b>mAh</b> を単位として読みます。数字そのものはカタカナにしません。TTS が読めるからです。</p>
+<h3>URL</h3>
+<pre>詳しくは https://example.com/docs を見てください
+  → 詳しくは イグザンプルドットコム を見てください</pre>
+<p>URL は全部読み上げると長くなるので、ドメインだけ残しています。</p>
+<h2>できていないこと</h2>
+<h3>まだ間違っている単語例</h3>
+<pre>esbuild    → エスブイルド       （エスビルド）
+rollup     → ロラップ         （ロールアップ）
+minute     → ミニッツ         （ミニット。minutes の読みが単数形に付いた）
+tickets    → チケット         （チケッツ。複数形の s が消えた）</pre>
+<p>単数形・複数形で日本人に親しみの深い方が使われているようです</p>
+<h3>複数の候補が一致しても、正しいとは限らない</h3>
+<p>いちばん堪えたのがこれです。<b>of</b> の候補は、こう並んでいました（辞書にも JMdict にも <b>of</b> の行が無いので、6つのうち4つしか埋まりません）。</p>
+<pre>綴り推定    オフ
+e2k（綴りから） オフ
+kanalizer   オフ
+e2k（音素から） オーブ
+  → LLM の答え「オフ」（自信 0.95）</pre>
+<p>こんな基本的な単語ですら最後までチェックからすり抜けていました。4つのうち3つが <b>オフ</b> で一致していて、<b>LLM もそれを追認しました。</b>人が目で見る表には「LLM の答えが駄目なものだけ書く」列を作ってあったので、追認された間違いは、そもそも列に現れません。</p>
+<p>候補がそろうのは、<b>4つの経路が同じ綴りを同じように読んだ</b>という意味でしかありませんでした。<b>of</b> と <b>or</b> は、最後に手で オブ・オア へ直しています。</p>
+<h3>同じ綴りを、文脈で読み分けられない</h3>
+<p>英語には、同じ綴りで読みが変わる語があります。kataAPI は綴りしか見ないので、どちらか一方しか返せません。</p>
+<pre>read the doc          → リードザドック
+I read it yesterday   → アイリード……    （レッド のはず）
+
+live streaming        → ライブストリーミング
+I live here           → アイライブヒア     （リブ のはず）</pre>
+<p>前後の語を見て品詞を判定すれば分かる場合もありますが、そこには手を付けていません。形態素解析を1つ挟むことになり、それは<b>速さが犠牲になってしまうからです。</b>ただ、kataAPI の用途としては基本的に日本語想定で、上記のような英文が混ざることはめったにないと思っているので、恐らく問題ないです。</p>
+<h3>日本語と地続きの綴りを、辞書に入れられない</h3>
+<p><b>Java入門</b> のような語は、変換そのものは可能です。</p>
+<pre>Java入門  → ジャバ入門
+if文      → イフ文</pre>
+<p>英字の並びだけを切り出して、そこを読んでいるからです。</p>
+<p>ただし<b>「Java入門」という1つの見出しで辞書に登録することはできません</b>し、TTSモデルへのとしては「ジャバ入門」となってしまい、出力の不自然さには多少なりとも影響するでしょう。</p>
+<h3>日本の固有名詞とぶつかる</h3>
+<p>略語の判定を広げたとき、<b>usada</b> が<b>ユーエスエーディーエー</b>と読まれるようになりました。英字の並びとしては略語の形をしているので、規則からは区別が付きません。</p>
+<p>ところがこれは「うさだ」という日本語の名前でもあります。そちらを壊すほうが困るので、判定を広げるのをやめました。いまは <b>アサダ</b> と読みます。これも正しくはありませんが、名前が一文字ずつ読み上げられるよりはましだ、という線で止めてあります。</p>
+<h2>Future Work — 新語を自動で拾う</h2>
+<p>対応できたら超うれしいものが何かと言うと、<b>新語</b>です。新しい会社名やサービス名は毎週出てきます。1語ずつ確かめていく方法だと、追いつきません。</p>
+<p>辞書に無くても綴りから読みは作れます。が、新語の中には誰も読み方が分からなかったが、後から読み方が公式で宣言されるタイプの新語もあります。<br>たとえばDify(ディファイかと思ってたらいつの間にか公式がディフィーで統一し始めた)とかGemini（ジェミニかジェミナイか覚えられない・・・と思ってたら英語ではジェミナイ。日本語では公式でもジェミニでいいらしい。）</p>
+<h2>使ったもの</h2>
+<p>記事に出てきた辞書・モデル・サービスの出どころです。<b>CMUdict・kanalizer・JMdict は表示義務があります。</b>JMdict だけ継承の条件が付くので、それを使った行は1ファイルに分けてあります。</p>
+<h3>読みを作るのに使ったもの</h3>
+<ul>
+  <li><b>e2k</b>（Unlicense / パブリックドメイン。作者 Patchethium）　<a href="https://github.com/Patchethium/e2k">https://github.com/Patchethium/e2k</a>　綴りからカタカナを作るモデル。使ったのは C2K と P2K。学習済みの重みはビルド時に取得しています</li>
+  <li><b>kanalizer</b>（MIT / Copyright (c) 2025 VOICEVOX）　<a href="https://github.com/VOICEVOX/kanalizer">https://github.com/VOICEVOX/kanalizer</a>　AivisSpeech が同梱しているもの。候補の1つとしてビルド時に呼んでいます</li>
+  <li><b>pyahocorasick</b>（BSD 3-Clause）　<a href="https://github.com/WojciechMula/pyahocorasick">https://github.com/WojciechMula/pyahocorasick</a>　11万語を一度に照合する部分</li>
+</ul>
+<h3>語と読みの出どころ</h3>
+<ul>
+  <li><b>CMUdict</b>（BSD 2-Clause / Carnegie Mellon University）　<a href="https://github.com/cmusphinx/cmudict">https://github.com/cmusphinx/cmudict</a>　使ったのは見出し語の綴りだけで、発音記号は使っていません</li>
+  <li><b>JMdict / EDICT</b>（CC BY-SA 4.0 / Electronic Dictionary Research and Development Group）　<a href="https://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project">https://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project</a>　継承の条件が付くので、ここから来た行だけを1ファイルに分けてあります</li>
+  <li><b>日本語版 Wikipedia</b>（CC BY-SA 4.0）　<a href="https://ja.wikipedia.org/">https://ja.wikipedia.org/</a>　既に決めた読みとWikipedia冒頭の読みを照合し、一致した場合にURLだけ記録</li>
+  <li><b>Wiktionary</b>（CC BY-SA 4.0）　<a href="https://www.wiktionary.org/">https://www.wiktionary.org/</a>　直接は使っていません。e2k の学習辞書の抽出元です</li>
+  <li><b>wordfreq</b>（Apache-2.0 / データは CC BY-SA 4.0。作者 Robyn Speer）　<a href="https://github.com/rspeer/wordfreq">https://github.com/rspeer/wordfreq</a>　よく使う英単語の一覧。順番を決めるのに使い、読みには触っていません</li>
+  <li><b>Qiita API v2</b>（<b>GET /api/v2/tags</b>）　<a href="https://qiita.com/api/v2/docs">https://qiita.com/api/v2/docs</a>　タグの記事数を、見る順番を決めるためだけに使っています</li>
+</ul>
+<h3>比べた音声合成エンジン</h3>
+<ul>
+  <li><b>VOICEVOX</b> — <a href="https://voicevox.hiroshiba.jp/">https://voicevox.hiroshiba.jp/</a>（測ったのは 0.25.2）</li>
+  <li><b>AivisSpeech</b> — <a href="https://aivis-project.com/">https://aivis-project.com/</a>（測ったのは 1.2.0）</li>
+</ul>
+<p>URL はすべて 2026-09-20 に現物を開いて確かめました。</p>
+</div>
+</body>
+</html>
